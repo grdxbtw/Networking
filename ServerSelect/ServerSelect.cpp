@@ -31,8 +31,18 @@ int main(int argc,  char* argv[])
 	}
 
 #if 1
-	Net::Server serv(addres, port);
-	serv.start();
+	NetServer::Server serv(addres, port);
+
+	if (serv.start())
+	{
+		std::cout << "server started\n";
+
+		std::string command;
+		do
+		{
+			std::getline(std::cin, command);
+		} while (command == "q");
+	}
 
 #endif // 0
 	

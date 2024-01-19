@@ -1,7 +1,14 @@
 #include "Server.h"
 #include "../../../cpp_projects/newCalculator/newCalculator/Kalkulator.h" 
 
-namespace Net
+#ifdef _DEBUG 
+#include<iostream>
+#define PRINT(MSG) std::cout << MSG << std::endl
+#else
+#define PRINT(MSG) 
+#endif // _DEBUG
+
+namespace NetServer
 {
 	WSADataHelper Server::wsa; 
 	Server::Server(const char* ipaddress, uint16_t port)
@@ -11,25 +18,30 @@ namespace Net
 		ListenSocket(INVALID_SOCKET) {}
 
 	Server::~Server()
-	{
-		clear_connections(); 
+	{		
+		shutdown();
 	}
-	void Server::start()
+	bool Server::start()
 	{
-		if (!init())
-			std::cerr << "cannot start server\n";
+		return init();
 	}
 	void Server::shutdown()
-	{
-		clear_connections(); 
-		std::cout << "server stopped\n"; 
-		exit(0); 
+	{	
+		if(!stop_working)
+		{
+			stop_working = true;
+			if (main_worker.joinable())
+				main_worker.join();
+
+			clear_connections();
+			PRINT("server stopped");
+		}
 	}
 	bool Server::init()
 	{
 		if(!wsa.IsOk())
 		{
-			std::cerr << "Couldn't init wsa\n";
+			PRINT("Couldn't init wsa!");
 			return false;
 		}
 
@@ -42,53 +54,51 @@ namespace Net
 		ListenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);  
 		if (ListenSocket == INVALID_SOCKET) 
 		{
-			std::cerr << "socket failed with error; " << WSAGetLastError() << std::endl; 
+			PRINT("socket failed with error; " << WSAGetLastError()); 
 			return false;
 		}
-		std::cout << "socket created!\n";
+		PRINT("socket created!");
 
 		iResult = bind(ListenSocket, (SOCKADDR*)&service, sizeof(service));
 		if (iResult == SOCKET_ERROR)
 		{
 			closesocket(ListenSocket);
-			std::cerr << "bind failed with error; " << WSAGetLastError() << std::endl;
+			PRINT("bind failed with error; " << WSAGetLastError());
 			return false;
 		}
-		std::cout << "bind Success!\n";
+		PRINT("bind Success!");
 
 		iResult = listen(ListenSocket, SOMAXCONN);
 		if (iResult == SOCKET_ERROR)
 		{
 			closesocket(ListenSocket);
-			std::cerr << "listen failed with error; " << WSAGetLastError() << std::endl;
+			PRINT("listen failed with error; " << WSAGetLastError());
 			return false;
 		}
-		std::cout << "listen Success!\n";
+		PRINT("listen Success!");
 
 		//start processor thread
 		stop_working = false;
-		std::thread worker_thread(&Server::worker,this);
-
-		do
-		{
-			struct sockaddr_in results;  
-			int sizeaddr = sizeof(results);
-			SOCKET ClientSocket = accept(ListenSocket, (SOCKADDR*)&results, &sizeaddr);
-			if (ClientSocket != INVALID_SOCKET)
-			{
-				std::cout << inet_ntoa(results.sin_addr) << '\t' << ntohs(results.sin_port) << '\n';
-				add_client(ClientSocket);
-			}
-			else
-			{
-				std::cerr << "accept failed with error; " << WSAGetLastError() << std::endl;
-				break;
-			}
-		} while (true);
-		stop_working = true;
-		worker_thread.join();
-
+		main_worker = std::thread(&Server::worker,this, ListenSocket);
 		return true;
+	}
+
+	bool Server::accept_client(SOCKET listenSocket)
+	{	
+		struct sockaddr_in results;
+		int sizeaddr = sizeof(results);
+		SOCKET ClientSocket = accept(listenSocket, (SOCKADDR*)&results, &sizeaddr);
+		if (ClientSocket != INVALID_SOCKET)
+		{
+			PRINT(inet_ntoa(results.sin_addr) << '\t' << ntohs(results.sin_port));
+			add_client(ClientSocket);
+			return true;
+		}
+		else
+		{
+			PRINT("accept failed with error; " << WSAGetLastError());
+			return false;
+		}
 	}
 
 	void Server::clear_connections()
@@ -168,17 +178,20 @@ namespace Net
 		clients.push_back(sck); 
 	}
 
-	void Server::worker()
+	void Server::worker(SOCKET listensocket) 
 	{
 		TIMEVAL timeout = {};
 		timeout.tv_sec = 1;
 		timeout.tv_usec = 0;
 		int nfds = 0;
 		fd_set reading;
+		
 		do {
 			FD_ZERO(&reading);
 			{
-				nfds = 0;
+				nfds = listensocket; 
+				FD_SET(listensocket, &reading);
+
 				std::lock_guard<std::mutex> lk(clients_mtx);
 				for (auto itr = clients.cbegin(); itr != clients.cend(); ++itr)
 				{
@@ -188,23 +201,20 @@ namespace Net
 						nfds = *itr;
 				}
 			}
-			++nfds; //max socket_id+1 for non-windows systems
-			if (nfds < 4)
-			{
-				std::this_thread::yield();
-				continue;
-			}
+			++nfds; //max socket_id+1 for non-windows system
+
 			//The nfds parameter is included only for compatibility with Berkeley sockets. Ignored.
 			int res = select(nfds, &reading, nullptr, nullptr, &timeout);
 			if (res < 0)
 			{
-				std::cerr << "Error in select\n";
+				PRINT("Error in select");
 			}
 			else if (res > 0)
 			{
 				std::vector<SOCKET> client;
 				{
 					std::lock_guard<std::mutex> lk(clients_mtx);
+
 					for (auto itr = clients.cbegin(); itr != clients.cend(); ++itr)
 					{
 						if (FD_ISSET(*itr, &reading))
@@ -214,6 +224,7 @@ namespace Net
 						// mb break if there is no clients ready
 					}
 				}
+				
 				for (size_t i = 0; i < client.size(); i++)
 				{
 					if (!do_work(client[i]))
@@ -222,10 +233,16 @@ namespace Net
 						remove_client(client[i]);
 					}
 				}
+
+				if (FD_ISSET(listensocket, &reading))
+				{
+					accept_client(listensocket);
+				}
 			
 			}
 			//else 0 - the time limit expired 
 
 		} while (!stop_working);
+		closesocket(listensocket);
 	}
 }

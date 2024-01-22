@@ -1,5 +1,11 @@
 #pragma once
+#ifdef _DEBUG
 #include <iostream>
+#define PRINT(MSG) std::cout << MSG << std::endl;    
+#else
+#define PRINT(MSG) 
+#endif // _DEBUG
+
 #include <string>
 
 #include <boost/bind/bind.hpp>
@@ -41,17 +47,16 @@ namespace Net_asio
     {
     private:
         tcp::socket socket_;
-        enum { max_length = 1024 };
-        char data_[max_length];
-        //boost::asio::mutable_buffer buffer_; 
+        uint32_t text_length_;  
+        std::unique_ptr<char[]> buffer_; 
 
 
     public:
-        using tcp_pointer = std::shared_ptr<Session>;
+        using session_pointer = std::shared_ptr<Session>;
 
-        static tcp_pointer create(boost::asio::io_context& ctx)
+        static session_pointer create(boost::asio::io_context& ctx) 
         {
-            return tcp_pointer(new Session(ctx));
+            return session_pointer(new Session(ctx)); 
         }
 
         tcp::socket& get_socket()
@@ -64,8 +69,10 @@ namespace Net_asio
         Session(boost::asio::io_context& ctx) : socket_(ctx) {} 
 
         void DoRead();
+        void DoReadText();
+
         void DoWrite(const std::string& message);
-        void HandleMessage(std::size_t length, boost::system::error_code& ec);
+        void HandleMessage();
     };
 
 
@@ -74,9 +81,9 @@ namespace Net_asio
     private:
         boost::asio::ip::tcp::acceptor acceptor_;
         boost::asio::io_context& ctx;
-
+         
     public:
-        ServerAsio(boost::asio::io_context& ioContext, short port)
+        ServerAsio(boost::asio::io_context& ioContext, uint16_t port) 
             : ctx(ioContext), acceptor_(ioContext, tcp::endpoint(tcp::v4(), port))
         {
             DoAccept();
@@ -89,6 +96,7 @@ namespace Net_asio
                 {
                     if (!ec)
                     {
+                        PRINT(socket.local_endpoint().port()); 
                         auto newConnection = Session::create(ctx);  
                         newConnection->get_socket() = std::move(socket); 
                         newConnection->start(); 
